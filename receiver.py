@@ -1,0 +1,212 @@
+import argparse
+import csv
+import json
+import os
+import socket
+import time
+
+VERSION = 1
+TRAFFIC_CLASSES = {"voice", "video", "best_effort"}
+
+
+def new_session():
+    return {
+        "sequences": set(),
+        "received": 0,
+        "duplicates": 0,
+        "expected": None,
+        "delays": [],
+        "intervals": [],
+        "bytes": 0,
+        "first": None,
+        "last": None,
+        "last_mono": None,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="QoS UDP traffic receiver")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=5001)
+    parser.add_argument("--log", default="logs/received.csv")
+    args = parser.parse_args()
+
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+
+    folder = os.path.dirname(args.log)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    sessions = {}
+    total_packets = 0
+    total_bytes = 0
+    start = time.monotonic()
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind((args.host, args.port))
+            sock.settimeout(1.0)
+
+            print(f"Listening on {args.host}:{args.port}")
+            print("Press Ctrl+C to stop.")
+
+            with open(args.log, "w", newline="", encoding="utf-8") as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    "receive_time_unix", "session_id", "traffic_class",
+                    "sequence", "sender_time_unix", "apparent_delay_ms",
+                    "interarrival_ms", "source_ip", "source_port",
+                    "payload_bytes"
+                ])
+
+                try:
+                    while True:
+                        try:
+                            data, address = sock.recvfrom(65535)
+                        except socket.timeout:
+                            continue
+
+                        receive_unix = time.time()
+                        receive_mono = time.monotonic()
+
+                        try:
+                            message = json.loads(data.decode("utf-8"))
+                            if not isinstance(message, dict):
+                                raise ValueError("Expected JSON object")
+                            if message.get("version") != VERSION:
+                                raise ValueError("Unsupported packet version")
+
+                            kind = message["type"]
+                            session_id = message["session_id"]
+                            traffic_class = message["traffic_class"]
+
+                            if traffic_class not in TRAFFIC_CLASSES:
+                                raise ValueError("Unknown traffic class")
+                            if not isinstance(session_id, str) or not session_id:
+                                raise ValueError("Invalid session ID")
+
+                            key = (session_id, traffic_class)
+
+                            if kind == "END":
+                                expected = int(message["total_sent"])
+                                if expected < 0:
+                                    raise ValueError("Invalid total_sent")
+                                state = sessions.setdefault(key, new_session())
+                                state["expected"] = expected
+                                print(
+                                    f"End marker: class={traffic_class}, "
+                                    f"sender reported {expected} packets"
+                                )
+                                continue
+
+                            if kind != "DATA":
+                                raise ValueError("Unknown packet type")
+
+                            sequence = int(message["sequence"])
+                            sender_time = float(message["send_time_unix"])
+                            if sequence < 0:
+                                raise ValueError("Invalid sequence number")
+
+                        except (
+                            UnicodeDecodeError, json.JSONDecodeError,
+                            KeyError, TypeError, ValueError, OverflowError
+                        ) as exc:
+                            print(f"Ignoring malformed packet from {address}: {exc}")
+                            continue
+
+                        state = sessions.setdefault(key, new_session())
+                        state["received"] += 1
+
+                        if sequence in state["sequences"]:
+                            state["duplicates"] += 1
+                        else:
+                            state["sequences"].add(sequence)
+
+                        previous = state["last_mono"]
+                        interarrival = (
+                            (receive_mono - previous) * 1000
+                            if previous is not None else None
+                        )
+                        if interarrival is not None:
+                            state["intervals"].append(interarrival)
+                        state["last_mono"] = receive_mono
+
+                        delay = (receive_unix - sender_time) * 1000
+                        state["delays"].append(delay)
+                        state["bytes"] += len(data)
+
+                        if state["first"] is None:
+                            state["first"] = receive_mono
+                        state["last"] = receive_mono
+
+                        total_packets += 1
+                        total_bytes += len(data)
+
+                        writer.writerow([
+                            receive_unix, session_id, traffic_class,
+                            sequence, sender_time, round(delay, 3),
+                            round(interarrival, 3)
+                            if interarrival is not None else "",
+                            address[0], address[1], len(data)
+                        ])
+
+                        if total_packets % 50 == 0:
+                            file.flush()
+                            print(f"Received {total_packets} DATA packets")
+
+                except KeyboardInterrupt:
+                    print("\nStopping receiver...")
+
+    except OSError as exc:
+        print(f"Receiver error: {exc}")
+        return
+
+    elapsed = max(time.monotonic() - start, 0.001)
+    print("\n========== RECEIVER SUMMARY ==========")
+    print(f"DATA packets received: {total_packets}")
+    print(f"Payload received: {total_bytes} bytes")
+    print(f"Overall receive rate: {total_packets / elapsed:.2f} packets/s")
+    print(f"Overall payload throughput: {total_bytes * 8 / elapsed:.2f} bits/s")
+
+    for (session_id, traffic_class), state in sessions.items():
+        sequences = state["sequences"]
+        expected = state["expected"]
+
+        print(f"\nClass: {traffic_class} | Session: {session_id[:8]}")
+        print(f"Packets received: {state['received']}")
+        print(f"Unique sequence numbers: {len(sequences)}")
+        print(f"Duplicate packets: {state['duplicates']}")
+
+        if expected is not None:
+            in_range = sum(1 for seq in sequences if 0 <= seq < expected)
+            missing = max(expected - in_range, 0)
+            loss = 100 * missing / expected if expected else 0.0
+            print(f"Sender-reported packets: {expected}")
+            print(f"Unique packets in expected range: {in_range}")
+            print(f"Estimated missing packets: {missing}")
+            print(f"Estimated packet loss: {loss:.2f}%")
+
+        if state["delays"]:
+            mean_delay = sum(state["delays"]) / len(state["delays"])
+            print(f"Mean apparent one-way delay: {mean_delay:.3f} ms")
+
+        intervals = state["intervals"]
+        if len(intervals) >= 2:
+            jitter = sum(
+                abs(intervals[i] - intervals[i - 1])
+                for i in range(1, len(intervals))
+            ) / (len(intervals) - 1)
+            print(f"Interarrival variation estimate: {jitter:.3f} ms")
+
+        first, last = state["first"], state["last"]
+        if first is not None and last is not None and last > first:
+            throughput = state["bytes"] * 8 / (last - first)
+            print(f"Class payload throughput: {throughput:.2f} bits/s")
+
+    print(f"\nCSV log: {args.log}")
+    print("One-way delay requires synchronized sender/receiver clocks.")
+
+
+if __name__ == "__main__":
+    main()
