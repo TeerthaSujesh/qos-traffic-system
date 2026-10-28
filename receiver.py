@@ -162,7 +162,18 @@ def main():
         print(f"Receiver error: {exc}")
         return
 
-    elapsed = max(time.monotonic() - start, 0.001)
+    packet_times = [
+        (state["first"], state["last"])
+        for state in sessions.values()
+        if state["first"] is not None and state["last"] is not None
+    ]
+
+    if packet_times:
+        first_packet = min(first for first, last in packet_times)
+        last_packet = max(last for first, last in packet_times)
+        elapsed = max(last_packet - first_packet, 0.001)
+    else:
+        elapsed = 0.001
     print("\n========== RECEIVER SUMMARY ==========")
     print(f"DATA packets received: {total_packets}")
     print(f"Payload received: {total_bytes} bytes")
