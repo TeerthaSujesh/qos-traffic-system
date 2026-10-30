@@ -1,0 +1,7 @@
+test,traffic_class,packets_received,mean_delay_ms,throughput_kbps
+test1,voice,500,0.252,102.40
+test1,video,300,0.269,61.44
+test1,best_effort,200,0.237,40.96
+test2,voice,5926,92.461,4854.58
+test2,video,3606,195.186,2954.04
+test2,best_effort,2434,294.356,1993.93

@@ -1,0 +1,14 @@
+ryu-env/
+ryu-source/
+mininet/*
+!mininet/custom/
+mininet/custom/*
+!mininet/custom/topo-2sw-2host.py
+backups/
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.zed/
+.DS_Store
+*.log
