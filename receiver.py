@@ -2,11 +2,13 @@ import argparse
 import csv
 import json
 import os
+import select
 import socket
 import time
 
 VERSION = 1
 TRAFFIC_CLASSES = {"voice", "video", "best_effort"}
+DEFAULT_PORTS = [5001, 5002, 5003]
 
 
 def new_session():
@@ -27,12 +29,37 @@ def new_session():
 def main():
     parser = argparse.ArgumentParser(description="QoS UDP traffic receiver")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=5001)
+    parser.add_argument(
+        "--ports",
+        type=str,
+        default=None,
+        help="Comma-separated UDP ports (default: 5001,5002,5003)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Listen on one UDP port only (backward compatibility)"
+    )
     parser.add_argument("--log", default="logs/received.csv")
     args = parser.parse_args()
 
-    if not 1 <= args.port <= 65535:
-        parser.error("--port must be between 1 and 65535")
+    try:
+        if args.port is not None:
+            ports = [args.port]
+        elif args.ports is not None:
+            ports = [int(p.strip()) for p in args.ports.split(",")]
+        else:
+            ports = DEFAULT_PORTS
+
+        if not ports or len(set(ports)) != len(ports):
+            parser.error("Ports must be non-empty and unique")
+
+        if any(not 1 <= port <= 65535 for port in ports):
+            parser.error("All ports must be between 1 and 65535")
+
+    except ValueError:
+        parser.error("Invalid port list")
 
     folder = os.path.dirname(args.log)
     if folder:
@@ -41,39 +68,43 @@ def main():
     sessions = {}
     total_packets = 0
     total_bytes = 0
-    start = time.monotonic()
+
+    sockets = []
 
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.bind((args.host, args.port))
-            sock.settimeout(1.0)
+        for port in ports:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind((args.host, port))
+            sockets.append(sock)
 
-            print(f"Listening on {args.host}:{args.port}")
-            print("Press Ctrl+C to stop.")
+        print(f"Listening on {args.host} ports: {', '.join(map(str, ports))}")
+        print("Press Ctrl+C to stop.")
 
-            with open(args.log, "w", newline="", encoding="utf-8") as file:
-                writer = csv.writer(file)
-                writer.writerow([
-                    "receive_time_unix", "session_id", "traffic_class",
-                    "sequence", "sender_time_unix", "apparent_delay_ms",
-                    "interarrival_ms", "source_ip", "source_port",
-                    "payload_bytes"
-                ])
+        with open(args.log, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                "receive_time_unix", "session_id", "traffic_class",
+                "sequence", "sender_time_unix", "apparent_delay_ms",
+                "interarrival_ms", "source_ip", "source_port",
+                "payload_bytes"
+            ])
 
-                try:
-                    while True:
-                        try:
-                            data, address = sock.recvfrom(65535)
-                        except socket.timeout:
-                            continue
+            try:
+                while True:
+                    readable, _, _ = select.select(sockets, [], [], 1.0)
 
+                    for sock in readable:
+                        data, address = sock.recvfrom(65535)
                         receive_unix = time.time()
                         receive_mono = time.monotonic()
+                        destination_port = sock.getsockname()[1]
 
                         try:
                             message = json.loads(data.decode("utf-8"))
+
                             if not isinstance(message, dict):
                                 raise ValueError("Expected JSON object")
+
                             if message.get("version") != VERSION:
                                 raise ValueError("Unsupported packet version")
 
@@ -83,17 +114,34 @@ def main():
 
                             if traffic_class not in TRAFFIC_CLASSES:
                                 raise ValueError("Unknown traffic class")
+
                             if not isinstance(session_id, str) or not session_id:
                                 raise ValueError("Invalid session ID")
+
+                            expected_port = {
+                                "voice": 5001,
+                                "video": 5002,
+                                "best_effort": 5003
+                            }[traffic_class]
+
+                            if destination_port != expected_port:
+                                raise ValueError(
+                                    f"{traffic_class} should use UDP "
+                                    f"port {expected_port}, received on "
+                                    f"{destination_port}"
+                                )
 
                             key = (session_id, traffic_class)
 
                             if kind == "END":
                                 expected = int(message["total_sent"])
+
                                 if expected < 0:
                                     raise ValueError("Invalid total_sent")
+
                                 state = sessions.setdefault(key, new_session())
                                 state["expected"] = expected
+
                                 print(
                                     f"End marker: class={traffic_class}, "
                                     f"sender reported {expected} packets"
@@ -105,6 +153,7 @@ def main():
 
                             sequence = int(message["sequence"])
                             sender_time = float(message["send_time_unix"])
+
                             if sequence < 0:
                                 raise ValueError("Invalid sequence number")
 
@@ -112,7 +161,9 @@ def main():
                             UnicodeDecodeError, json.JSONDecodeError,
                             KeyError, TypeError, ValueError, OverflowError
                         ) as exc:
-                            print(f"Ignoring malformed packet from {address}: {exc}")
+                            print(
+                                f"Ignoring malformed packet from {address}: {exc}"
+                            )
                             continue
 
                         state = sessions.setdefault(key, new_session())
@@ -128,8 +179,10 @@ def main():
                             (receive_mono - previous) * 1000
                             if previous is not None else None
                         )
+
                         if interarrival is not None:
                             state["intervals"].append(interarrival)
+
                         state["last_mono"] = receive_mono
 
                         delay = (receive_unix - sender_time) * 1000
@@ -138,6 +191,7 @@ def main():
 
                         if state["first"] is None:
                             state["first"] = receive_mono
+
                         state["last"] = receive_mono
 
                         total_packets += 1
@@ -155,12 +209,16 @@ def main():
                             file.flush()
                             print(f"Received {total_packets} DATA packets")
 
-                except KeyboardInterrupt:
-                    print("\nStopping receiver...")
+            except KeyboardInterrupt:
+                print("\nStopping receiver...")
 
     except OSError as exc:
         print(f"Receiver error: {exc}")
         return
+
+    finally:
+        for sock in sockets:
+            sock.close()
 
     packet_times = [
         (state["first"], state["last"])
@@ -174,6 +232,7 @@ def main():
         elapsed = max(last_packet - first_packet, 0.001)
     else:
         elapsed = 0.001
+
     print("\n========== RECEIVER SUMMARY ==========")
     print(f"DATA packets received: {total_packets}")
     print(f"Payload received: {total_bytes} bytes")
@@ -193,6 +252,7 @@ def main():
             in_range = sum(1 for seq in sequences if 0 <= seq < expected)
             missing = max(expected - in_range, 0)
             loss = 100 * missing / expected if expected else 0.0
+
             print(f"Sender-reported packets: {expected}")
             print(f"Unique packets in expected range: {in_range}")
             print(f"Estimated missing packets: {missing}")
@@ -203,14 +263,17 @@ def main():
             print(f"Mean apparent one-way delay: {mean_delay:.3f} ms")
 
         intervals = state["intervals"]
+
         if len(intervals) >= 2:
             jitter = sum(
                 abs(intervals[i] - intervals[i - 1])
                 for i in range(1, len(intervals))
             ) / (len(intervals) - 1)
+
             print(f"Interarrival variation estimate: {jitter:.3f} ms")
 
         first, last = state["first"], state["last"]
+
         if first is not None and last is not None and last > first:
             throughput = state["bytes"] * 8 / (last - first)
             print(f"Class payload throughput: {throughput:.2f} bits/s")
