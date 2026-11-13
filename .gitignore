@@ -12,3 +12,5 @@ __pycache__/
 .zed/
 .DS_Store
 *.log
+logs/*.csv
+/mininet/
