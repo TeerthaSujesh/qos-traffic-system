@@ -1,0 +1,4 @@
+Traffic Class,Packets Sent,Packets Received,Estimated Packet Loss (%),Average Delay (ms),Average Jitter (ms),Throughput (Kbps)
+voice,500,500,0.0,0.807,1.629,102.62
+video,800,800,0.0,0.657,1.358,164.05
+best_effort,1000,1000,0.0,0.652,1.428,205.03
