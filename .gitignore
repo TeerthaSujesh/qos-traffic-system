@@ -1,16 +1,28 @@
+# Python environments
 ryu-env/
 ryu-source/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Mininet source
+/mininet/
 mininet/*
+
+# Keep custom topology
 !mininet/custom/
 mininet/custom/*
 !mininet/custom/topo-2sw-2host.py
+
+# Logs and backups
 backups/
-__pycache__/
-*.py[cod]
-.venv/
+logs/
+*.log
+
+# Editor and system files
 .idea/
 .zed/
 .DS_Store
-*.log
-logs/*.csv
-/mininet/
