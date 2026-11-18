@@ -1,3 +1,4 @@
+
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import (
@@ -20,11 +21,14 @@ class QosController(app_manager.RyuApp):
 
     def add_flow(self, dp, priority, match, actions):
         parser = dp.ofproto_parser
+
         instructions = [
             parser.OFPInstructionActions(
-                dp.ofproto.OFPIT_APPLY_ACTIONS, actions
+                dp.ofproto.OFPIT_APPLY_ACTIONS,
+                actions
             )
         ]
+
         dp.send_msg(
             parser.OFPFlowMod(
                 datapath=dp,
@@ -35,23 +39,31 @@ class QosController(app_manager.RyuApp):
         )
 
     @set_ev_cls(
-        ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER
+        ofp_event.EventOFPSwitchFeatures,
+        CONFIG_DISPATCHER
     )
     def switch_features_handler(self, ev):
         dp = ev.msg.datapath
         parser = dp.ofproto_parser
         ofproto = dp.ofproto
 
+        self.logger.info("Switch %s connected", dp.id)
+
         match = parser.OFPMatch()
+
         actions = [
             parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER,
                 ofproto.OFPCML_NO_BUFFER,
             )
         ]
+
         self.add_flow(dp, 0, match, actions)
 
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    @set_ev_cls(
+        ofp_event.EventOFPPacketIn,
+        MAIN_DISPATCHER
+    )
     def packet_in_handler(self, ev):
         msg = ev.msg
         dp = msg.datapath
@@ -67,33 +79,58 @@ class QosController(app_manager.RyuApp):
         dpid = dp.id
         in_port = msg.match["in_port"]
 
+        self.logger.info(
+            "PACKET IN: switch=%s src=%s dst=%s in_port=%s",
+            dpid, eth.src, eth.dst, in_port
+        )
+
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][eth.src] = in_port
 
         out_port = self.mac_to_port[dpid].get(
-            eth.dst, ofproto.OFPP_FLOOD
+            eth.dst,
+            ofproto.OFPP_FLOOD
         )
 
-        actions = []
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         udp_pkt = pkt.get_protocol(udp.udp)
 
         queue_map = {
-            5001: 3,  # High
-            5002: 2,  # Medium
-            5003: 1,  # Low
+            5001: 3,
+            5002: 2,
+            5003: 1,
         }
 
         queue_id = None
+
         if ip_pkt is not None and udp_pkt is not None:
             queue_id = queue_map.get(udp_pkt.dst_port)
 
-        if out_port != ofproto.OFPP_FLOOD and queue_id is not None:
-            actions.append(parser.OFPActionSetQueue(queue_id))
+            self.logger.info(
+                "UDP PACKET: src_port=%s dst_port=%s queue=%s",
+                udp_pkt.src_port,
+                udp_pkt.dst_port,
+                queue_id
+            )
 
-        actions.append(parser.OFPActionOutput(out_port))
+        actions = []
+
+        if out_port != ofproto.OFPP_FLOOD and queue_id is not None:
+            actions.append(
+                parser.OFPActionSetQueue(queue_id)
+            )
+
+            self.logger.info(
+                "QUEUE SELECTED: queue=%s output_port=%s",
+                queue_id, out_port
+            )
+
+        actions.append(
+            parser.OFPActionOutput(out_port)
+        )
 
         if out_port != ofproto.OFPP_FLOOD:
+
             if ip_pkt is not None and udp_pkt is not None:
                 match = parser.OFPMatch(
                     in_port=in_port,
@@ -102,15 +139,31 @@ class QosController(app_manager.RyuApp):
                     ip_proto=17,
                     udp_dst=udp_pkt.dst_port,
                 )
+
                 priority = 100 if queue_id is not None else 10
+
+            elif eth.ethertype == ether_types.ETH_TYPE_ARP:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_dst=eth.dst,
+                    eth_type=ether_types.ETH_TYPE_ARP,
+                )
+                priority = 10
+
             else:
                 match = parser.OFPMatch(
                     in_port=in_port,
                     eth_dst=eth.dst,
+                    eth_type=eth.ethertype,
                 )
                 priority = 10
 
-            self.add_flow(dp, priority, match, actions)
+            self.add_flow(
+                dp,
+                priority,
+                match,
+                actions
+            )
 
         data = (
             msg.data
