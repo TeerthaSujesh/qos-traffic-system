@@ -1,3 +1,3 @@
 Traffic Class,Packets Sent,Packets Received,Estimated Packet Loss (%),Average Delay (ms),Average Jitter (ms),Throughput (Kbps)
-Voice,965,965,0.0,763.678,3.984,854.2
-Best Effort,476,435,8.61,1632.151,20.234,409.65
+Voice,1012,1012,0.0,744.859,2.823,876.54
+Best Effort,570,538,5.61,1305.302,14.826,505.96

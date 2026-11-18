@@ -1,17 +1,17 @@
-from os_ken.base import app_manager
-from os_ken.controller import ofp_event
-from os_ken.controller.handler import (
+from ryu.base import app_manager
+from ryu.controller import ofp_event
+from ryu.controller.handler import (
     CONFIG_DISPATCHER,
     MAIN_DISPATCHER,
     set_ev_cls,
 )
-from os_ken.ofproto import ofproto_v1_3
-from os_ken.lib.packet import (
+from ryu.ofproto import ofproto_v1_3
+from ryu.lib.packet import (
     packet, ethernet, ether_types, ipv4, udp
 )
 
 
-class QosController(app_manager.OSKenApp):
+class QosController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
